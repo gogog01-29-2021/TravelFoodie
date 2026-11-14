@@ -1,11 +1,11 @@
 package com.travelfoodie
 
 import android.Manifest
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
-import android.telephony.SmsManager
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -39,16 +39,6 @@ class FriendsFragment : Fragment() {
             showPhoneContactsDialog()
         } else {
             Snackbar.make(requireView(), "Contacts permission denied", Snackbar.LENGTH_SHORT).show()
-        }
-    }
-
-    private val requestSmsPermission = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { isGranted ->
-        if (isGranted) {
-            // SMS permission granted
-        } else {
-            Snackbar.make(requireView(), "SMS permission denied", Snackbar.LENGTH_SHORT).show()
         }
     }
 
@@ -175,33 +165,37 @@ class FriendsFragment : Fragment() {
                     }
                 }
                 .setNeutralButton("Send SMS Invite") { _, _ ->
-                    selectedContacts.forEach { index ->
-                        sendSMSInvite(contacts[index].phoneNumber)
-                    }
+                    sendSMSInvite(selectedContacts.map { index -> contacts[index].phoneNumber })
                 }
                 .setNegativeButton("Cancel", null)
                 .show()
         }
     }
 
-    private fun sendSMSInvite(phoneNumber: String) {
-        when {
-            ContextCompat.checkSelfPermission(
-                requireContext(),
-                Manifest.permission.SEND_SMS
-            ) == PackageManager.PERMISSION_GRANTED -> {
-                try {
-                    val smsManager = SmsManager.getDefault()
-                    val message = viewModel.getSMSInviteMessage()
-                    smsManager.sendTextMessage(phoneNumber, null, message, null, null)
-                    Snackbar.make(requireView(), "Invite sent to $phoneNumber", Snackbar.LENGTH_SHORT).show()
-                } catch (e: Exception) {
-                    Snackbar.make(requireView(), "Failed to send SMS", Snackbar.LENGTH_SHORT).show()
-                }
-            }
-            else -> {
-                requestSmsPermission.launch(Manifest.permission.SEND_SMS)
-            }
+    /**
+     * Opens the user's default messaging app with the invite pre-filled.
+     * Uses ACTION_SENDTO instead of SmsManager, so no SEND_SMS permission is needed
+     * (SEND_SMS is restricted on Google Play to default-SMS-handler apps).
+     * The user reviews and presses send in their own messaging app.
+     */
+    private fun sendSMSInvite(phoneNumbers: List<String>) {
+        if (phoneNumbers.isEmpty()) return
+
+        // Keep only dialable characters so the smsto: URI is clean (contacts may contain spaces/dashes).
+        val recipients = phoneNumbers
+            .map { number -> number.filter { c -> c.isDigit() || c == '+' } }
+            .filter { it.isNotEmpty() }
+            .joinToString(";")
+        if (recipients.isEmpty()) return
+
+        val intent = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:$recipients")).apply {
+            putExtra("sms_body", viewModel.getSMSInviteMessage())
+        }
+
+        try {
+            startActivity(intent)
+        } catch (e: ActivityNotFoundException) {
+            Snackbar.make(requireView(), "No messaging app available", Snackbar.LENGTH_SHORT).show()
         }
     }
 
