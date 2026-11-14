@@ -6,6 +6,17 @@ plugins {
     alias(libs.plugins.google.services)
 }
 
+// Release signing secrets come from local.properties or environment variables.
+// Keystores and local.properties are gitignored; nothing signing-related is committed.
+//   RELEASE_STORE_FILE, RELEASE_STORE_PASSWORD, RELEASE_KEY_ALIAS, RELEASE_KEY_PASSWORD
+val releaseSigningProps = java.util.Properties().apply {
+    val propsFile = rootProject.file("local.properties")
+    if (propsFile.exists()) propsFile.inputStream().use { load(it) }
+}
+
+fun releaseSigningValue(key: String): String? =
+    releaseSigningProps.getProperty(key) ?: System.getenv(key)
+
 android {
     namespace = "com.travelfoodie"
     compileSdk = 34
@@ -15,7 +26,7 @@ android {
         minSdk = 26
         targetSdk = 34
         versionCode = 1
-        versionName = "1.0"
+        versionName = "1.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         
@@ -34,6 +45,20 @@ android {
         buildConfigField("String", "NAVER_CLIENT_SECRET", "\"${properties.getProperty("NAVER_CLIENT_SECRET", "")}\"")
     }
 
+    // Only configured when RELEASE_STORE_FILE points at a real keystore, so debug and
+    // CI builds without secrets keep working (the release build is then simply unsigned).
+    signingConfigs {
+        create("release") {
+            val storePath = releaseSigningValue("RELEASE_STORE_FILE")
+            if (storePath != null && file(storePath).exists()) {
+                storeFile = file(storePath)
+                storePassword = releaseSigningValue("RELEASE_STORE_PASSWORD")
+                keyAlias = releaseSigningValue("RELEASE_KEY_ALIAS")
+                keyPassword = releaseSigningValue("RELEASE_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
@@ -41,6 +66,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            signingConfig = signingConfigs.getByName("release").takeIf { it.storeFile != null }
         }
         debug {
             isMinifyEnabled = false
