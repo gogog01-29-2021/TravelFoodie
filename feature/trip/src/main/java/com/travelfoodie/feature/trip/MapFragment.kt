@@ -3,8 +3,10 @@ package com.travelfoodie.feature.trip
 import android.Manifest
 import android.annotation.SuppressLint
 import android.content.pm.PackageManager
+import android.content.res.Resources
 import android.location.Geocoder
 import android.os.Bundle
+import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -13,7 +15,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.activityViewModels
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.maps.CameraUpdateFactory
@@ -21,13 +25,18 @@ import com.google.android.gms.maps.GoogleMap
 import com.google.android.gms.maps.OnMapReadyCallback
 import com.google.android.gms.maps.SupportMapFragment
 import com.google.android.gms.maps.model.LatLng
+import com.google.android.gms.maps.model.LatLngBounds
+import com.google.android.gms.maps.model.MapStyleOptions
 import com.google.android.gms.maps.model.Marker
 import com.google.android.gms.maps.model.MarkerOptions
+import com.travelfoodie.core.data.local.entity.RestaurantEntity
 import com.travelfoodie.core.data.remote.GooglePlacesApi
+import com.travelfoodie.core.data.repository.RestaurantRepository
 import com.travelfoodie.core.ui.SharedTripViewModel
 import com.travelfoodie.feature.trip.databinding.FragmentMapBinding
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
@@ -43,6 +52,14 @@ class MapFragment : Fragment(), OnMapReadyCallback {
 
     @Inject
     lateinit var googlePlacesApi: GooglePlacesApi
+
+    @Inject
+    lateinit var restaurantRepository: RestaurantRepository
+
+    // Restaurants of the selected trip, drawn as category markers.
+    private val restaurantMarkers = mutableListOf<Marker>()
+    private var restaurants: List<RestaurantEntity> = emptyList()
+    private var fittedRegionId: String? = null
 
     private var googleMap: GoogleMap? = null
     private var selectedMarker: Marker? = null
@@ -102,6 +119,91 @@ class MapFragment : Fragment(), OnMapReadyCallback {
         binding.fabMyLocation.setOnClickListener {
             moveToCurrentLocation()
         }
+
+        observeRestaurants()
+    }
+
+    /**
+     * Shows the selected trip's restaurants on the map as category markers.
+     * SharedTripViewModel.selectedTripId actually holds the REGION id (see its KDoc).
+     */
+    private fun observeRestaurants() {
+        viewLifecycleOwner.lifecycleScope.launch {
+            viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                sharedViewModel.selectedTripId.collectLatest { regionId ->
+                    if (regionId == null) {
+                        restaurants = emptyList()
+                        fittedRegionId = null
+                        renderRestaurantMarkers(null)
+                    } else {
+                        restaurantRepository.getRestaurantsByRegion(regionId).collect { list ->
+                            restaurants = list
+                            renderRestaurantMarkers(regionId)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun renderRestaurantMarkers(regionId: String?) {
+        // Before the map is ready there is nothing to draw on; onMapReady renders again.
+        val map = googleMap ?: return
+        val ctx = context ?: return
+
+        restaurantMarkers.forEach { it.remove() }
+        restaurantMarkers.clear()
+
+        val positions = mutableListOf<LatLng>()
+        for (restaurant in restaurants) {
+            if (restaurant.lat == 0.0 && restaurant.lng == 0.0) continue
+            val position = LatLng(restaurant.lat, restaurant.lng)
+            val rating = String.format(Locale.US, "%.1f", restaurant.rating)
+            val marker = map.addMarker(
+                MarkerOptions()
+                    .position(position)
+                    .title(restaurant.name)
+                    .snippet("${restaurant.category} · ★$rating")
+                    .icon(CategoryMarkers.iconFor(ctx, restaurant.category))
+                    .anchor(0.5f, 0.5f)
+            )
+            if (marker != null) {
+                restaurantMarkers.add(marker)
+                positions.add(position)
+            }
+        }
+
+        // Move the camera once per selected region, not on every database update.
+        if (regionId != null && positions.isNotEmpty() && fittedRegionId != regionId) {
+            fittedRegionId = regionId
+            fitCamera(map, positions)
+        }
+    }
+
+    private fun fitCamera(map: GoogleMap, positions: List<LatLng>) {
+        val first = positions.first()
+        if (positions.distinct().size == 1) {
+            map.animateCamera(CameraUpdateFactory.newLatLngZoom(first, 14f))
+            return
+        }
+        val bounds = LatLngBounds.builder().apply { positions.forEach { include(it) } }.build()
+        try {
+            map.animateCamera(CameraUpdateFactory.newLatLngBounds(bounds, 160))
+        } catch (e: IllegalStateException) {
+            // newLatLngBounds throws when the map has not been laid out yet (size 0).
+            map.animateCamera(CameraUpdateFactory.newLatLngZoom(first, 13f))
+        }
+    }
+
+    private fun applyMapStyle(map: GoogleMap) {
+        try {
+            val applied = map.setMapStyle(
+                MapStyleOptions.loadRawResourceStyle(requireContext(), R.raw.map_style)
+            )
+            if (!applied) Log.w(TAG, "Map style could not be parsed; using the default style")
+        } catch (e: Resources.NotFoundException) {
+            Log.w(TAG, "Map style resource not found; using the default style", e)
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -123,6 +225,8 @@ class MapFragment : Fragment(), OnMapReadyCallback {
     override fun onMapReady(map: GoogleMap) {
         googleMap = map
 
+        applyMapStyle(map)
+
         // Default location (Seoul)
         val defaultLocation = LatLng(37.5665, 126.9780)
         googleMap?.moveCamera(CameraUpdateFactory.newLatLngZoom(defaultLocation, 10f))
@@ -137,6 +241,9 @@ class MapFragment : Fragment(), OnMapReadyCallback {
         googleMap?.setOnMapClickListener { latLng ->
             reverseGeocodeAndSelect(latLng)
         }
+
+        // A trip may already be selected: draw its restaurants now that the map exists.
+        renderRestaurantMarkers(sharedViewModel.selectedTripId.value)
     }
 
     private fun checkLocationPermission() {
@@ -400,6 +507,12 @@ class MapFragment : Fragment(), OnMapReadyCallback {
 
     override fun onDestroyView() {
         super.onDestroyView()
+        restaurantMarkers.clear()
+        googleMap = null
         _binding = null
+    }
+
+    private companion object {
+        const val TAG = "MapFragment"
     }
 }
