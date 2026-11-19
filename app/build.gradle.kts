@@ -27,8 +27,10 @@ android {
         applicationId = "com.travelfoodie"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        // CI release builds set VERSION_CODE (must increase every release so Android accepts
+        // the update) and VERSION_NAME (the git tag); local builds keep the defaults.
+        versionCode = System.getenv("VERSION_CODE")?.toIntOrNull() ?: 1
+        versionName = System.getenv("VERSION_NAME") ?: "1.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         

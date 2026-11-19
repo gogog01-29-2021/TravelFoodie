@@ -1,0 +1,109 @@
+name: Release APK
+
+# Push a tag like v1.0.0 to build a signed APK and publish it as a GitHub Release.
+# Needs these repository secrets (see docs/RELEASING.md):
+#   RELEASE_KEYSTORE_BASE64, RELEASE_STORE_PASSWORD, RELEASE_KEY_ALIAS, RELEASE_KEY_PASSWORD
+#   MAPS_API_KEY, KAKAO_API_KEY, NAVER_CLIENT_ID, NAVER_CLIENT_SECRET  (baked into the APK)
+# Without the keystore secret it still builds, but UNSIGNED, and does not publish a Release.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      KEYSTORE_B64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+      RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+      RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+      RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+      MAPS_API_KEY_SECRET: ${{ secrets.MAPS_API_KEY }}
+      KAKAO_API_KEY_SECRET: ${{ secrets.KAKAO_API_KEY }}
+      NAVER_CLIENT_ID_SECRET: ${{ secrets.NAVER_CLIENT_ID }}
+      NAVER_CLIENT_SECRET_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      - name: Decide signed or unsigned
+        id: signing
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/release.jks"
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+            echo "RELEASE_STORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::RELEASE_KEYSTORE_BASE64 is not set: building an UNSIGNED APK and skipping the GitHub Release."
+          fi
+
+      - name: Write local.properties from secrets (placeholders if a secret is missing)
+        run: |
+          {
+            echo "MAPS_API_KEY=${MAPS_API_KEY_SECRET:-CI_PLACEHOLDER}"
+            echo "KAKAO_API_KEY=${KAKAO_API_KEY_SECRET:-0123456789abcdef0123456789abcdef}"
+            echo "NAVER_CLIENT_ID=${NAVER_CLIENT_ID_SECRET:-ci-placeholder}"
+            echo "NAVER_CLIENT_SECRET=${NAVER_CLIENT_SECRET_SECRET:-ci-placeholder}"
+          } > local.properties
+          [ -n "$MAPS_API_KEY_SECRET" ] || echo "::warning::MAPS_API_KEY secret is not set: the map will not load in this build."
+
+      - name: Version from the tag (manual runs on a branch get a dev version)
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            NAME="${GITHUB_REF_NAME#v}"
+          else
+            NAME="dev-${GITHUB_RUN_NUMBER}"
+          fi
+          echo "VERSION_NAME=$NAME" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+          echo "FILE_TAG=${GITHUB_REF_NAME//\//-}" >> "$GITHUB_ENV"
+
+      - name: Build release APK
+        run: ./gradlew :app:assembleRelease --stacktrace
+
+      - name: Name and verify the APK
+        id: apk
+        run: |
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          SRC=$(ls app/build/outputs/apk/release/*.apk | head -1)
+          DEST="TravelFoodie-${FILE_TAG}.apk"
+          cp "$SRC" "$DEST"
+          echo "file=$DEST" >> "$GITHUB_OUTPUT"
+          if [ "${{ steps.signing.outputs.signed }}" = "true" ]; then
+            "$BT/apksigner" verify --print-certs "$DEST" | tee cert.txt
+            echo "Add the SHA-256 above (and package com.travelfoodie) to the Maps API key restrictions."
+          fi
+          sha256sum "$DEST" | tee "$DEST.sha256"
+
+      - name: Upload APK as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: |
+            TravelFoodie-*.apk
+            TravelFoodie-*.apk.sha256
+          retention-days: 14
+
+      - name: Publish GitHub Release
+        if: steps.signing.outputs.signed == 'true' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "${{ steps.apk.outputs.file }}" "${{ steps.apk.outputs.file }}.sha256" \
+            --title "TravelFoodie $GITHUB_REF_NAME" --generate-notes
