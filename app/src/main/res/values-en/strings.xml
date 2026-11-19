@@ -3,6 +3,7 @@
     <string name="app_name">TravelFoodie</string>
     
     <!-- Navigation -->
+    <string name="nav_map">Map</string>
     <string name="nav_trips">Trips</string>
     <string name="nav_attractions">Attractions</string>
     <string name="nav_restaurants">Restaurants</string>
