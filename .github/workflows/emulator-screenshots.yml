@@ -1,0 +1,80 @@
+name: Emulator screenshots
+
+# Manual run: builds the DEBUG app, boots an emulator, walks the bottom-nav tabs and uploads
+# screenshots. If the repository secret MAPS_API_KEY is set, it is used so the map shows real
+# tiles and the styled map is visible. In that case the APK is not uploaded and logcat is
+# dropped, because the key would otherwise be readable in a public artifact.
+# Without the secret a placeholder key is used and the map renders as an empty grey grid.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["ci/screenshots"]
+
+permissions:
+  contents: read
+
+jobs:
+  screenshots:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      MAPS_API_KEY_SECRET: ${{ secrets.MAPS_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      - name: Write local.properties (real Maps key if provided, else placeholder)
+        run: |
+          if [ -n "$MAPS_API_KEY_SECRET" ]; then
+            echo "HAS_REAL_KEY=1" >> "$GITHUB_ENV"
+            MAPS="$MAPS_API_KEY_SECRET"
+          else
+            echo "HAS_REAL_KEY=0" >> "$GITHUB_ENV"
+            MAPS="CI_PLACEHOLDER"
+          fi
+          {
+            echo "MAPS_API_KEY=$MAPS"
+            echo "KAKAO_API_KEY=0123456789abcdef0123456789abcdef"
+            echo "NAVER_CLIENT_ID=ci-placeholder"
+            echo "NAVER_CLIENT_SECRET=ci-placeholder"
+          } > local.properties
+
+      - name: Enable KVM for the emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Assemble debug APK
+        run: ./gradlew :app:assembleDebug --stacktrace
+
+      - name: Boot emulator and capture screenshots
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          KEEP_LOGCAT: ${{ env.HAS_REAL_KEY == '1' && '0' || '1' }}
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          script: bash .github/scripts/screenshots.sh
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: screenshots/
+          if-no-files-found: warn
